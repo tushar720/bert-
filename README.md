@@ -1,25 +1,25 @@
-# DocBERT
+# Hierarchical BERT
 
-Finetuning the pre-trained [BERT](https://arxiv.org/abs/1810.04805) models for Document Classification tasks.
+A wrapper around pre-trained [BERT](https://arxiv.org/abs/1810.04805) models for finetuning on Document Classification tasks.
 
 ## Quick start
 
 For fine-tuning the pre-trained BERT-base model on Reuters dataset, just run the following from the project working directory.
 
 ```
-python -m models.bert --dataset Reuters --model bert-base-uncased --max-seq-length 256 --batch-size 16 --lr 2e-5 --epochs 30
+python -m models.hbert --dataset Reuters --model bert-base-uncased --max-seq-length 256 --batch-size 16 --lr 2e-5 --epochs 30
 ```
 
 The best model weights will be saved in
 
 ```
-models/bert/saves/Reuters/best_model.pt
+models/hbert/saves/Reuters/best_model.pt
 ```
 
 To test the model, you can use the following command.
 
 ```
-python -m models.bert --dataset Reuters --model bert-base-uncased --max-seq-length 256 --batch-size 16 --lr 2e-5 --epochs 30 --trained-model models/bert/saves/Reuters/best_model.pt
+python -m models.hbert --dataset Reuters --model bert-base-uncased --max-seq-length 256 --batch-size 16 --lr 2e-5 --epochs 30 --trained-model models/hbert/saves/Reuters/best_model.pt
 ```
 
 ## Model Types 
@@ -33,7 +33,6 @@ We follow the same types of models as in [huggingface's implementation](https://
 ## Dataset
 
 We experiment the model on the following datasets:
-
 - Reuters (ModApte)
 - AAPD
 - IMDB

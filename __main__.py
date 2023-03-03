@@ -3,7 +3,7 @@ import time
 
 import numpy as np
 import torch
-from transformers import AdamW, BertForSequenceClassification, BertTokenizer, WarmupLinearSchedule
+from transformers import AdamW, BertTokenizer, WarmupLinearSchedule
 
 from common.constants import *
 from common.evaluators.bert_evaluator import BertEvaluator
@@ -15,7 +15,8 @@ from datasets.bert_processors.reuters_processor import ReutersProcessor
 from datasets.bert_processors.sogou_processor import SogouProcessor
 from datasets.bert_processors.sst_processor import SST2Processor
 from datasets.bert_processors.yelp2014_processor import Yelp2014Processor
-from models.bert.args import get_args
+from models.hbert.args import get_args
+from models.hbert.model import HierarchicalBert
 
 
 def evaluate_split(model, processor, tokenizer, args, split='dev'):
@@ -64,12 +65,14 @@ if __name__ == '__main__':
     args.n_gpu = n_gpu
     args.num_labels = dataset_map[args.dataset].NUM_CLASSES
     args.is_multilabel = dataset_map[args.dataset].IS_MULTILABEL
+    args.pretrained_model_path = args.model if os.path.isfile(args.model) else PRETRAINED_MODEL_ARCHIVE_MAP[args.model]
 
     if not args.trained_model:
         save_path = os.path.join(args.save_path, dataset_map[args.dataset].NAME)
         os.makedirs(save_path, exist_ok=True)
 
-    args.is_hierarchical = False
+    args.is_hierarchical = True
+    args.output_hidden_states = True
     processor = dataset_map[args.dataset]()
     pretrained_vocab_path = PRETRAINED_VOCAB_ARCHIVE_MAP[args.model]
     tokenizer = BertTokenizer.from_pretrained(pretrained_vocab_path)
@@ -81,8 +84,7 @@ if __name__ == '__main__':
         num_train_optimization_steps = int(
             len(train_examples) / args.batch_size / args.gradient_accumulation_steps) * args.epochs
 
-    pretrained_model_path = args.model if os.path.isfile(args.model) else PRETRAINED_MODEL_ARCHIVE_MAP[args.model]
-    model = BertForSequenceClassification.from_pretrained(pretrained_model_path, num_labels=args.num_labels)
+    model = HierarchicalBert(args)
 
     if args.fp16:
         model.half()
@@ -93,39 +95,45 @@ if __name__ == '__main__':
 
     # Prepare optimizer
     param_optimizer = list(model.named_parameters())
+
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
     optimizer_grouped_parameters = [
-        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
-        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}]
+        {'params': [p for n, p in param_optimizer if 'sentence_encoder' not in n],
+         'lr': args.lr * args.lr_mult, 'weight_decay': 0.0},
+        {'params': [p for n, p in param_optimizer if 'sentence_encoder' in n and not any(nd in n for nd in no_decay)],
+         'weight_decay': 0.01},
+        {'params': [p for n, p in param_optimizer if 'sentence_encoder' in n and any(nd in n for nd in no_decay)],
+         'weight_decay': 0.0}]
 
-    if not args.trained_model:
-        if args.fp16:
-            try:
-                from apex.optimizers import FP16_Optimizer
-                from apex.optimizers import FusedAdam
-            except ImportError:
-                raise ImportError("Please install NVIDIA Apex for FP16 training")
+    if args.fp16:
+        try:
+            from apex.optimizers import FP16_Optimizer
+            from apex.optimizers import FusedAdam
+        except ImportError:
+            raise ImportError("Please install NVIDIA Apex for distributed and FP16 training")
 
-            optimizer = FusedAdam(optimizer_grouped_parameters,
-                                  lr=args.lr,
-                                  bias_correction=False,
-                                  max_grad_norm=1.0)
-            if args.loss_scale == 0:
-                optimizer = FP16_Optimizer(optimizer, dynamic_loss_scale=True)
-            else:
-                optimizer = FP16_Optimizer(optimizer, static_loss_scale=args.loss_scale)
+        optimizer = FusedAdam(optimizer_grouped_parameters,
+                              lr=args.lr,
+                              bias_correction=False,
+                              max_grad_norm=1.0)
+        if args.loss_scale == 0:
+            optimizer = FP16_Optimizer(optimizer, dynamic_loss_scale=True)
         else:
-            optimizer = AdamW(optimizer_grouped_parameters, lr=args.lr, weight_decay=0.01, correct_bias=False)
-            scheduler = WarmupLinearSchedule(optimizer, t_total=num_train_optimization_steps,
-                                             warmup_steps=args.warmup_proportion * num_train_optimization_steps)
-
-        trainer = BertTrainer(model, optimizer, processor, scheduler, tokenizer, args)
-        trainer.train()
-        model = torch.load(trainer.snapshot_path)
+            optimizer = FP16_Optimizer(optimizer, static_loss_scale=args.loss_scale)
 
     else:
-        model = BertForSequenceClassification.from_pretrained(pretrained_model_path, num_labels=args.num_labels)
-        model_ = torch.load(args.trained_model, map_location=lambda storage, loc: storage)
+        optimizer = AdamW(optimizer_grouped_parameters, lr=args.lr, weight_decay=0.01, correct_bias=False)
+        scheduler = WarmupLinearSchedule(optimizer, t_total=num_train_optimization_steps,
+                                         warmup_steps=args.warmup_proportion * num_train_optimization_steps)
+
+    trainer = BertTrainer(model, optimizer, processor, scheduler, tokenizer, args)
+
+    if not args.trained_model:
+        trainer.train()
+        model = torch.load(trainer.snapshot_path)
+    else:
+        model = model = HierarchicalBert(args.model)
+        model_ = torch.load(args, map_location=lambda storage, loc: storage)
         state = {}
         for key in model_.state_dict().keys():
             new_key = key.replace("module.", "")
